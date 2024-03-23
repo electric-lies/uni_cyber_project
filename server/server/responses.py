@@ -15,9 +15,9 @@ class ResponseHeader:
 
     def encode(self) -> bytes:
         return (
-            self.version.to_bytes(1)
-            + self.code.to_bytes(2)
-            + self.payload_size.to_bytes(4)
+            self.version.to_bytes(1, "little")
+            + self.code.to_bytes(2, "little")
+            + self.payload_size.to_bytes(4, "little")
         )
 
 
@@ -32,7 +32,7 @@ class FileAcceptedWithCRC:
     def encode(self) -> bytes:
         return (
             self.client_id
-            + self.content_size.to_bytes(4)
+            + self.content_size.to_bytes(4, "little")
             + self.file_name.encode("utf-8")
             + self.cksum
         )

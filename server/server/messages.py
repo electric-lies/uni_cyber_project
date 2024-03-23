@@ -57,9 +57,9 @@ def parse_message_header(bytes_header: bytes) -> MessageHeader:
 
     return MessageHeader(
         client_id,
-        int.from_bytes(version),
-        MessageCode(int.from_bytes(code)),
-        int.from_bytes(payload_size),
+        int.from_bytes(version, "little"),
+        MessageCode(int.from_bytes(code, "little")),
+        int.from_bytes(payload_size, "little"),
     )
 
 
@@ -75,10 +75,10 @@ class FileSendMessage:
     @classmethod
     def from_bytes(cls, content: bytes):
         return cls(
-            int.from_bytes(content[:4]),
-            int.from_bytes(content[4:8]),
-            int.from_bytes(content[8:10]),
-            int.from_bytes(content[10:12]),
+            int.from_bytes(content[:4], "little"),
+            int.from_bytes(content[4:8], "little"),
+            int.from_bytes(content[8:10], "little"),
+            int.from_bytes(content[10:12], "little"),
             content[12:267].decode(),
             content[267:],
         )

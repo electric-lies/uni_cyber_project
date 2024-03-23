@@ -1,3 +1,6 @@
+import socket
+
+
 def message() -> bytes:
     client_id = "0123456789abcdef0123456789abcdef"
     version = 1
@@ -13,8 +16,6 @@ def message() -> bytes:
     )
     return message
 
-
-import socket
 
 HOST, PORT = "localhost", 1256
 data = message()

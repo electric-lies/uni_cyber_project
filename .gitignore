@@ -2,3 +2,11 @@
 server/server/__pycache__/
 
 server/tests/__pycache__/
+
+client/.vscode/
+
+*.ods#
+
+client/cryptopp890/
+
+*.odt#
