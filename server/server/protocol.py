@@ -29,36 +29,50 @@ from responses import (
 from Crypto import Random
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
-import hashlib
 from crcfile import crctab
-
+from pathlib import Path
 VERSION = 3
 
 
 class FileRepo:
-    def __init__(self) -> None:
+    def __init__(self, con: sqlite3.Connection) -> None:
         self.pub_keys: dict[str, bytes] = dict()
+        self._con = con
 
     """managing the storage of files"""
 
-    def save_file(self, file_name: str, content: bytes, packet=-1, packet_count=-1):
+    def ack(self, cid: bytes, file: str):
+        cur = self._con.cursor()
+        cur.execute(
+            """
+                UPDATE files SET Verified = 1 Where ID = ? and FileName = ?
+            """,
+            (cid.hex(), file),
+        )
+        cur.close()
+        self._con.commit()
+
+    def save_file(
+        self, cid: bytes, file_name: str, content: bytes, packet=-1, packet_count=-1
+    ):
         # TODO make sure files not being overrun, especially not important ones
         logging.info(
             f"writing {len(content)} bytes to file {file_name}, {packet}/{packet_count}"
         )
 
-        with open("files/" + file_name.rstrip("\x00"), "w") as f:
+        path = Path(f"./files/{cid.hex()}")
+        path.mkdir()
+        with open(path / file_name.rstrip("\x00"), "w") as f:
             f.write(content.decode("utf-8"))
-
-    def save_pub_key(self, key: bytes, user: str):
-        # protect from overriding
-        self.pub_keys[user] = key
-
-    def get_pub_key(self, user: str) -> Tuple[bytes, bool]:
-        if user not in self.pub_keys:
-            return bytes(), False
-        return self.pub_keys[user], True
-
+        cur = self._con.cursor()
+        cur.execute(
+            """
+                INSERT INTO files VALUES (?,?,?,?) 
+            """,
+            (cid.hex(), file_name, cid.hex() + "/" + file_name, 0),
+        )
+        cur.close()
+        self._con.commit()
 
 class Session(ABC):
     @abstractmethod
@@ -93,23 +107,23 @@ class EncryptedSession(Session):
     private_key: bytes
     client_id: bytes
     _file_repo: FileRepo
+    _con: sqlite3.Connection
 
     def proccess_message(self, message: Message) -> Tuple[Session, Response]:
         if isinstance(message.content, CrcGoodMessage) or isinstance(
             message.content, CrcBadMessage
         ):
             rc = AckMessage(self.client_id)
-            return RegisteredUserSession(self.client_id, self._file_repo), Response(
-                ResponseHeader(VERSION, rc.code, rc.size()), rc
-            )
+            self._file_repo.ack(message.header.client_id, message.content.file_name)
+            return RegisteredUserSession(
+                self.client_id, self._file_repo, self._con
+            ), Response(ResponseHeader(VERSION, rc.code, rc.size()), rc)
 
         if isinstance(message.content, FileSendMessage):
             cipher = AES.new(
                 self.private_key, AES.MODE_CBC, iv=int(0).to_bytes(16, "little")
             )
             ctext = message.content.encrypted_content
-            # if len(ctext) < AES.block_size:
-            # ctext
             plaintext = cipher.decrypt(ctext)
             logging.info(
                 f"the {len(message.content.encrypted_content)} bytes long ciphertext named {message.content.file_name} was decrypted to the following text: {plaintext}"
@@ -118,7 +132,7 @@ class EncryptedSession(Session):
             cksum = memcrc(plaintext)
 
             self._file_repo.save_file(
-                message.content.file_name, plaintext
+                message.header.client_id, message.content.file_name, plaintext
             )  # TODO handle multipacketfiles
             rc = FileAcceptedWithCRC(
                 self.client_id,
@@ -140,15 +154,55 @@ class RegisteredUserSession(Session):
     _file_repo: FileRepo
     _con: sqlite3.Connection
 
+    def _save_pub_key(self, key: bytes, cid: bytes):
+        cur = self._con.cursor()
+        cur.execute(
+            f"""
+                                   UPDATE clients
+                                   SET PublicKey = ?
+                                   WHERE ID = ?
+                                   """,
+            (key, cid.hex()),
+        )
+        cur.close()
+        self._con.commit()
+
+    def _get_pub_key(self, cid: bytes) -> Tuple[bytes, bool]:
+        cur = self._con.cursor()
+        res = cur.execute(
+            """
+                                         select PublicKey
+                                         from clients
+                                         where ID = ?
+                                         """,
+            (cid.hex(),),
+        ).fetchone()
+        cur.close()
+        if res is not None:
+            return res[0], True
+        else:
+            return b"", False
+
+    def _save_private_key(self, key: bytes, cid: bytes):
+        cur = self._con.cursor()
+        cur.execute(
+            f"""
+                                   UPDATE clients
+                                   SET AES = ?
+                                   WHERE ID = ?
+                                   """,
+            (key, cid.hex()),
+        )
+        cur.close()
+        self._con.commit()
+
     def proccess_message(self, message: Message) -> Tuple[Session, Response]:
         if isinstance(message.content, PublicKeyMessage):
             public_key = message.content.public_key
-            self._file_repo.save_pub_key(
-                message.content.public_key, message.content.name
-            )
+            self._save_pub_key(message.content.public_key, message.header.client_id)
 
         elif isinstance(message.content, ReconnectMessage):
-            public_key, success = self._file_repo.get_pub_key(message.content.name)
+            public_key, success = self._get_pub_key(message.header.client_id)
             if not success:
                 content = DeclineReconnect(self.client_id)
                 return NewSession(self._file_repo, self._con), Response(
@@ -160,6 +214,7 @@ class RegisteredUserSession(Session):
 
         random = Random.new()
         aes_key = random.read(16)
+        self._save_private_key(aes_key, self.client_id)
         logging.info(f"AES key is {aes_key.hex()}, RSA key is {public_key}")
         rsa_public_key = RSA.importKey(public_key)
         logging.info(f"{len(aes_key)=}, {len(public_key)=}")
@@ -172,9 +227,9 @@ class RegisteredUserSession(Session):
         else:
             content = ApproveReconnect(self.client_id, encrypted_aes)
 
-        return EncryptedSession(aes_key, self.client_id, self._file_repo), Response(
-            ResponseHeader(VERSION, content.code, content.size()), content
-        )
+        return EncryptedSession(
+            aes_key, self.client_id, self._file_repo, self._con
+        ), Response(ResponseHeader(VERSION, content.code, content.size()), content)
 
 
 class NewSession(Session):
@@ -198,15 +253,29 @@ class NewSession(Session):
         if not isinstance(message.content, RegisterMessage):
             raise Exception("Unidetified message type")
 
-        new_id = uuid.uuid4().bytes[:16]
+        new_id = uuid.uuid4().bytes
         c = SuccessfulRegistration(new_id)
 
         cur = self._con.cursor()
-        cur.execute(f"""
-                    INSERT INTO clients VALUES
-                    ('{client_id}', '{message.content.name}', '', {int(time.time())},''),
-                   """)
+        try:
+            self._con.set_trace_callback(print)
+            cur.execute(
+                """
+                        INSERT INTO clients VALUES
+                        (?, ?, zeroblob(160), ?,zeroblob(32))
+                       """,
+                (new_id.hex(), message.content.name.rstrip("\x00"), int(time.time())),
+            )
+            cur.close()
+            self._con.commit()
 
+        except sqlite3.Error as er:
+            logging.error(
+                (new_id.hex(), message.content.name.rstrip("\x00"), int(time.time()))
+            )
+            logging.error(er)
+            logging.error(er.sqlite_errorcode)  # Prints 275
+            logging.error(er.sqlite_errorname)  # Prints SQLITE_CONSTRAINT_CHECK
 
         return RegisteredUserSession(new_id, self._file_repo, self._con), Response(
             ResponseHeader(
@@ -226,11 +295,27 @@ class SessionStore:
     sessions: dict[bytes, Session]
     _file_repo: FileRepo
 
-    def __init__(self, fr: FileRepo, db_name: str) -> None:
+    def __init__(self, db_name: str) -> None:
         self.sessions = dict()
-        self._file_repo = fr
         self._con = sqlite3.connect(db_name)
- 
+        self._file_repo = FileRepo(self._con)
+
+    def _get_reconnect_session_from_db(self, key: bytes) -> Optional[Session]:
+        cur = self._con.cursor()
+        res = cur.execute(
+            f"""
+                    select Name
+                    from clients
+                    where ID = ?
+                    """,
+            (key.hex(),),
+        )
+        client = res.fetchone()
+        cur.close()
+        if client is None:
+            return None
+        else:
+            return RegisteredUserSession(key, self._file_repo, self._con)
 
     def proccess_message(self, message: Message) -> Optional[Response]:
         if message.header.code == MessageCode.register:
@@ -242,11 +327,15 @@ class SessionStore:
         else:
             key = message.header.client_id
             if key not in self.sessions.keys():
-                rc = FaileRegistration()
-                return Response(
-                    ResponseHeader(VERSION, rc.code, rc.size()),
-                    rc,
-                )
+                session = self._get_reconnect_session_from_db(key)
+                if session is None:
+                    rc = FaileRegistration()
+                    return Response(
+                        ResponseHeader(VERSION, rc.code, rc.size()),
+                        rc,
+                    )
+                else:
+                    self.sessions[key] = session
 
             curr_session = self.sessions[key]
             next_session, resp = curr_session.proccess_message(message)

@@ -10,3 +10,9 @@ client/.vscode/
 client/cryptopp890/
 
 *.odt#
+
+*.db
+
+server/.python-version
+
+server/server/files/

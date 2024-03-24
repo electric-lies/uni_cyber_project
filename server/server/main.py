@@ -8,10 +8,10 @@ from messages import (
     Message,
 )
 from protocol import FileRepo, SessionStore
-from responses import Response, ResponseHeader
+from responses import ResponseHeader
 
 logging.basicConfig(level=logging.INFO)
-sessions = SessionStore(FileRepo(), 'defensive.db')
+sessions = SessionStore("defensive.db")
 
 
 class MyTCPHandler(socketserver.BaseRequestHandler):
@@ -55,8 +55,13 @@ if __name__ == "__main__":
 
     con = sqlite3.connect("defensive.db")
     cur = con.cursor()
-    cur.execute("CREATE IF NOT EXISTS TABLE clients(ID VARCHAR(16), Name VARCHAR(255), PublicKey VARCHAR(160), LastSeen INTEGER, AES VARCHAR(32))")
-    cur.execute("CREATE IF NOT EXISTS TABLE files(ID VARCHAR(16), FileName VARCHAR(255), PublicKey VARCHAR(255), Verified INTEGER")
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS clients(ID VARCHAR(32) PRIMARY KEY, Name VARCHAR(255), PublicKey BLOB, LastSeen INTEGER, AES BLOB)"
+    )
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS files(ID VARCHAR(32) NOT NULL, FileName VARCHAR(255) NOT NULL, PathName VARCHAR(255), Verified INTEGER, FOREIGN KEY(ID) REFERENCES client(id), PRIMARY KEY (ID, FileName))"
+    )
+    con.commit()
     logging.info(f"listening on {HOST}:{PORT} for incomin traffic")
 
     # Create the server, binding to localhost on port 9999
