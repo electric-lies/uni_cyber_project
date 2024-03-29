@@ -66,7 +66,7 @@ class SuccessfulRegistration:
         return 16
 
 
-class FaileRegistration:
+class FailedRegistration:
     code = 1601
 
     def encode(self) -> bytes:
@@ -112,15 +112,27 @@ class DeclineReconnect:
     def size(self):
         return 16
 
+@dataclass
+class GeneralError:
+    code = 1607
+
+    def encode(self) -> bytes:
+        return b''
+
+    def size(self):
+        return 0
+
+
 
 ResponseContent = typing.Union[
     SuccessfulRegistration,
-    FaileRegistration,
+    FailedRegistration,
     EncryptedAESKey,
     FileAcceptedWithCRC,
     AckMessage,
     ApproveReconnect,
     DeclineReconnect,
+    GeneralError
 ]
 
 

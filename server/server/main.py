@@ -17,7 +17,6 @@ sessions = SessionStore("defensive.db")
 class MyTCPHandler(socketserver.BaseRequestHandler):
     def handle(self):
         self.header_data = self.request.recv(TOTAL_HEADER_LENGTH)
-        logging.info(f"recived {self.header_data}")
         try:
             header = parse_message_header(self.header_data)
         except Exception as e:
@@ -27,7 +26,6 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
         print(header)
         self.data = self.request.recv(header.payload_size)
         content = parse_meesage_content(header.code, self.data)
-        print(content)
         message = Message(header, content)
         response = sessions.proccess_message(message)
         if response is not None:
@@ -56,7 +54,7 @@ if __name__ == "__main__":
     con = sqlite3.connect("defensive.db")
     cur = con.cursor()
     cur.execute(
-        "CREATE TABLE IF NOT EXISTS clients(ID VARCHAR(32) PRIMARY KEY, Name VARCHAR(255), PublicKey BLOB, LastSeen INTEGER, AES BLOB)"
+        "CREATE TABLE IF NOT EXISTS clients(ID VARCHAR(32) PRIMARY KEY, Name VARCHAR(255) UNIQUE, PublicKey BLOB, LastSeen INTEGER, AES BLOB)"
     )
     cur.execute(
         "CREATE TABLE IF NOT EXISTS files(ID VARCHAR(32) NOT NULL, FileName VARCHAR(255) NOT NULL, PathName VARCHAR(255), Verified INTEGER, FOREIGN KEY(ID) REFERENCES client(id), PRIMARY KEY (ID, FileName))"

@@ -1,7 +1,7 @@
 import sqlite3
 from dataclasses import dataclass
 import logging
-from typing import Optional, Self, Tuple
+from typing import Dict, List, Optional, Self, Tuple
 from messages import (
     CrcBadMessage,
     CrcGoodMessage,
@@ -20,8 +20,9 @@ from responses import (
     ApproveReconnect,
     DeclineReconnect,
     EncryptedAESKey,
-    FaileRegistration,
+    FailedRegistration,
     FileAcceptedWithCRC,
+    GeneralError,
     Response,
     ResponseHeader,
     SuccessfulRegistration,
@@ -29,15 +30,18 @@ from responses import (
 from Crypto import Random
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP, AES
+from Crypto.Util.Padding import unpad # type: ignore
 from crcfile import crctab
 from pathlib import Path
 VERSION = 3
 
 
 class FileRepo:
+    ongoing_files: Dict[str, List[Tuple[int, bytes]]]
     def __init__(self, con: sqlite3.Connection) -> None:
         self.pub_keys: dict[str, bytes] = dict()
         self._con = con
+        self.ongoing_files = dict()
 
     """managing the storage of files"""
 
@@ -53,17 +57,30 @@ class FileRepo:
         self._con.commit()
 
     def save_file(
-        self, cid: bytes, file_name: str, content: bytes, packet=-1, packet_count=-1
+            self, cid: bytes, file_name: str, content: bytes, packet: int, packet_count: int
     ):
+        if file_name not in self.ongoing_files.keys():
+            self.ongoing_files[file_name] = [(packet, content)]
+        else:
+            self.ongoing_files[file_name].append((packet, content))
+
+        if len(self.ongoing_files[file_name]) == packet_count:
+            content = b''.join(map(lambda tup: tup[1],sorted(self.ongoing_files[file_name])))
+            logging.info(f"all packets of {file_name} arrived")
+        else:
+            logging.info(f"saved packet {packet} of file {file_name}, now we have {len(self.ongoing_files[file_name])}/{packet_count}")
+            return
+        
         # TODO make sure files not being overrun, especially not important ones
         logging.info(
-            f"writing {len(content)} bytes to file {file_name}, {packet}/{packet_count}"
+            f"writing {len(content)} bytes to file {file_name}"
         )
 
         path = Path(f"./files/{cid.hex()}")
-        path.mkdir()
-        with open(path / file_name.rstrip("\x00"), "w") as f:
-            f.write(content.decode("utf-8"))
+        if not path.exists():
+            path.mkdir()
+        with open(path / file_name.rstrip("\x00"), "wb") as f:
+            f.write(content)
         cur = self._con.cursor()
         cur.execute(
             """
@@ -84,7 +101,6 @@ UNSIGNED = lambda n: n & 0xFFFFFFFF
 
 
 def memcrc(b: bytes) -> bytes:
-    print(f"memcrc {b=}")
     n = len(b)
     c = s = 0
     for ch in b:
@@ -96,7 +112,6 @@ def memcrc(b: bytes) -> bytes:
         n = n >> 8
         s = UNSIGNED(s << 8) ^ crctab[(s >> 24) ^ c]
     res = UNSIGNED(~s)
-    logging.info(f"memcrc {res=}")
     return res.to_bytes(4, "little")
 
 
@@ -115,24 +130,19 @@ class EncryptedSession(Session):
         ):
             rc = AckMessage(self.client_id)
             self._file_repo.ack(message.header.client_id, message.content.file_name)
-            return RegisteredUserSession(
-                self.client_id, self._file_repo, self._con
-            ), Response(ResponseHeader(VERSION, rc.code, rc.size()), rc)
+            return self, Response(ResponseHeader(VERSION, rc.code, rc.size()), rc)
 
         if isinstance(message.content, FileSendMessage):
             cipher = AES.new(
                 self.private_key, AES.MODE_CBC, iv=int(0).to_bytes(16, "little")
             )
             ctext = message.content.encrypted_content
-            plaintext = cipher.decrypt(ctext)
-            logging.info(
-                f"the {len(message.content.encrypted_content)} bytes long ciphertext named {message.content.file_name} was decrypted to the following text: {plaintext}"
-            )
-
+            logging.info(f"{len(ctext)=}")
+            plaintext = unpad(cipher.decrypt(ctext), 16)
             cksum = memcrc(plaintext)
 
             self._file_repo.save_file(
-                message.header.client_id, message.content.file_name, plaintext
+                message.header.client_id, message.content.file_name, plaintext, message.content.current_packet, message.content.total_packets
             )  # TODO handle multipacketfiles
             rc = FileAcceptedWithCRC(
                 self.client_id,
@@ -210,7 +220,7 @@ class RegisteredUserSession(Session):
                 )
 
         else:
-            raise Exception("Unexpected message type")
+            raise Exception(f"Unexpected message type {message.header.code} while in AES key exchange")
 
         random = Random.new()
         aes_key = random.read(16)
@@ -246,7 +256,7 @@ class NewSession(Session):
 
     def proccess_message(
         self, message: Message
-    ) -> Tuple[RegisteredUserSession, Response]:
+    ) -> Tuple[Session, Response]:
         assert not self._is_used, "Session cant be used twice"
         self._is_used = True
 
@@ -258,7 +268,6 @@ class NewSession(Session):
 
         cur = self._con.cursor()
         try:
-            self._con.set_trace_callback(print)
             cur.execute(
                 """
                         INSERT INTO clients VALUES
@@ -268,7 +277,11 @@ class NewSession(Session):
             )
             cur.close()
             self._con.commit()
-
+        except sqlite3.IntegrityError as er:
+            content = FailedRegistration()
+            return NewSession(
+                self._file_repo, self._con
+            ),Response(ResponseHeader(VERSION, content.code, content.size()), content) 
         except sqlite3.Error as er:
             logging.error(
                 (new_id.hex(), message.content.name.rstrip("\x00"), int(time.time()))
@@ -285,8 +298,6 @@ class NewSession(Session):
             ),
             c,
         )
-        # elif isinstance(message.content, RegisterMessage):
-        #    pass
 
 
 class SessionStore:
@@ -326,10 +337,11 @@ class SessionStore:
 
         else:
             key = message.header.client_id
-            if key not in self.sessions.keys():
+            if  message.header.code == MessageCode.reconnect or key not in self.sessions.keys():
                 session = self._get_reconnect_session_from_db(key)
                 if session is None:
-                    rc = FaileRegistration()
+                    rc = GeneralError()
+                    logging.warn(f"unknown user {key=} tried to perform operation and it was not registration")
                     return Response(
                         ResponseHeader(VERSION, rc.code, rc.size()),
                         rc,

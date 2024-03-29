@@ -1,5 +1,7 @@
 #include "Base64Wrapper.h"
 #include <cryptopp/config_ns.h>
+#include <cryptopp/filters.h>
+#include <cryptopp/base64.h>
 
 std::string Base64Wrapper::encode(const std::string &str)
 {

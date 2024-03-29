@@ -16,3 +16,7 @@ client/cryptopp890/
 server/.python-version
 
 server/server/files/
+
+big_binary/
+
+client/big_binary
